@@ -1,0 +1,317 @@
+---
+title: "MEAN WEEKLY TEMPERATURE ARIMAX MODEL"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+!!!!!!!!!!!!!!!!
+LOADING PACKAGES
+!!!!!!!!!!!!!!!!
+```{r load-packages, echo=TRUE, results='hide', message=FALSE}
+library("tidyr")
+library("feasts")
+library("MMWRweek")
+library("data.table")
+library("caret")
+library("purrr")
+library("skimr")
+library("ggcorrplot")
+library("DataExplorer")
+#library("cdcfluview")
+library("dplyr")
+library("tseries")
+library("forecast")
+library("tsibble")
+library("berryFunctions")
+library("scoringutils")
+library("covidHubUtils")
+library("gtools")
+library("parallel")
+library("doParallel")
+library("foreach")
+library("future")#https://cran.r-project.org/web/packages/future/vignettes/future-4-issues.html
+library("listenv")
+library("lubridate")
+library("corrplot")
+library("sf")
+library("ggrepel")
+library("Metrics")
+library("epitools")
+```
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+LOADING DATASETS AND FUNCTIONS 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+```{r load-data, echo=TRUE, message=FALSE}
+#############################################
+#       LOADING AND CLEANING THE DATASET      
+#############################################
+source("FINAL_ARIMA.r", local = TRUE, chdir = TRUE)
+
+my_data = read.csv("ILINet.csv")
+state_codes<-read.csv("State_Codes.csv")
+
+states_data<-combining_states_data(my_data,state_codes)
+
+```
+!!!!!!!!!!!!!!!!!!!!!!
+PLOTTING THE DATASETS 
+!!!!!!!!!!!!!!!!!!!!!!
+```{r load-data, echo=TRUE, message=FALSE}
+##############################################
+# VISUALIZING FLU WEEKLY TIMESERIES FOR EACH STATE (1-52) #
+##############################################
+for(i in 1:48){
+  title_<- state_codes[state_codes$location == states_data[[i]]$location[1], ]$location_name
+  # Determine the range of the y-axis
+  y_range <- range(states_data[[i]]$cases)
+
+# Calculate the breaks for the y-axis (e.g., every 1000)
+  y_breaks <- seq(0, y_range[2], by = 100)
+
+  states_data[[i]] <- states_data[[i]] %>% 
+  arrange(target_end_date)
+
+p <- ggplot(states_data[[i]], aes(x=target_end_date, y=cases)) + 
+     geom_line(aes(group = 1)) + 
+     scale_x_date(date_breaks = "1 year", date_labels = "%Y")+ labs(title = title_)
+p
+  print(p)
+ 
+}
+
+```
+LOADING THE TEMPERATURE DATASET BASED ON THE MEAN TEMPERATURE OF EACH STATE USING ERA5 DATA
+
+```{r cars}
+temperature_dataset = read.csv("weekly_temperature_dataset.csv")
+```
+
+TESTING THE FUNCTION
+
+```{r cars}
+source("FINAL_TEMPERATURE.r", local = TRUE, chdir = TRUE)
+WIS_MAE=CLEAN_TEMPERATURE(states_data,temperature_dataset, US_STATE=3, auto=TRUE, my_n_ahead=1)
+WIS_MAE
+```
+
+GETTING WIS AND MAE FOR 1 WEEK AHEAD AND THE EXECUTION TIME
+
+```{r cars}
+start_time <- Sys.time() # Record start time
+
+WIS_W1_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 596))
+MAE_W1_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 596))
+
+  for (i in 1:47){
+    wis_mae=CLEAN_TEMPERATURE(states_data,temperature_dataset,US_STATE=i, auto=TRUE, my_n_ahead=1)
+    
+    WIS_W1_AUTO_ARIMAX_TEMPERATURE <- cbind(WIS_W1_AUTO_ARIMAX_TEMPERATURE,wis_mae[2])
+    MAE_W1_AUTO_ARIMAX_TEMPERATURE <- cbind(MAE_W1_AUTO_ARIMAX_TEMPERATURE,wis_mae[3])
+    
+    WIS_W1_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    MAE_W1_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    
+    print(i)
+    
+  }
+
+# Your code here
+end_time <- Sys.time() # Record end time
+# Calculate elapsed time
+execution_time <- end_time - start_time
+execution_time
+
+write.csv(execution_time, file = "exc_time_WIS_W1_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+
+#### Name of the dataset ####
+dates_names<-c("Dates")
+states_names <- state_codes$location_name[1:47]
+colnames(WIS_W1_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+colnames(MAE_W1_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+
+# WRITE THE CSVs of the files
+write.csv(WIS_W1_AUTO_ARIMAX_TEMPERATURE, file = "WIS_W1_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+write.csv(MAE_W1_AUTO_ARIMAX_TEMPERATURE, file = "MAE_W1_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+#### Mean WIS by state ####
+mean_wis_each_state<-data.frame(colMeans(WIS_W1_AUTO_ARIMAX_TEMPERATURE[,2:48]))
+colnames(mean_wis_each_state)<-c("MEAN_WIS_W1_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean MAE by state ####
+mean_absolute_error<-data.frame(colSums(abs(MAE_W1_AUTO_ARIMAX_TEMPERATURE[,2:48]))/nrow(MAE_W1_AUTO_ARIMAX_TEMPERATURE))
+colnames(mean_absolute_error)<-c("MAE_W1_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean WIS and MAE ####
+
+WIS_MAE_W1_AUTO_ARIMAX_TEMPERATURE<-cbind(mean_wis_each_state,mean_absolute_error)
+write.csv(WIS_MAE_W1_AUTO_ARIMAX_TEMPERATURE, file = "WIS_MAE_W1_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+```
+
+GETTING WIS AND MAE FOR 2 WEEKS AHEAD AND THE EXECUTION TIME
+
+```{r cars}
+source("FINAL_TEMPERATURE.r", local = TRUE, chdir = TRUE)
+
+start_time <- Sys.time() # Record start time
+
+WIS_W2_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 595))
+MAE_W2_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 595))
+
+  for (i in 1:47){
+    wis_mae=CLEAN_TEMPERATURE(states_data,temperature_dataset,US_STATE=i, auto=TRUE, my_n_ahead=2)
+    
+    WIS_W2_AUTO_ARIMAX_TEMPERATURE <- cbind(WIS_W2_AUTO_ARIMAX_TEMPERATURE,wis_mae[2])
+    MAE_W2_AUTO_ARIMAX_TEMPERATURE <- cbind(MAE_W2_AUTO_ARIMAX_TEMPERATURE,wis_mae[3])
+    WIS_W2_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    MAE_W2_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    print(i)
+  }
+
+# Your code here
+end_time <- Sys.time() # Record end time
+# Calculate elapsed time
+execution_time <- end_time - start_time
+execution_time
+
+write.csv(execution_time, file = "exc_time_WIS_W2_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+#### Name of the dataset ####
+dates_names<-c("Dates")
+states_names <- state_codes$location_name[1:47]
+colnames(WIS_W2_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+colnames(MAE_W2_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+
+# WRITE THE CSVs of the files
+write.csv(WIS_W2_AUTO_ARIMAX_TEMPERATURE, file = "WIS_W2_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+write.csv(MAE_W2_AUTO_ARIMAX_TEMPERATURE, file = "MAE_W2_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+#### Mean WIS by state ####
+mean_wis_each_state<-data.frame(colMeans(WIS_W2_AUTO_ARIMAX_TEMPERATURE[,2:48]))
+colnames(mean_wis_each_state)<-c("MEAN_WIS_W2_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean MAE by state ####
+mean_absolute_error<-data.frame(colSums(abs(MAE_W2_AUTO_ARIMAX_TEMPERATURE[,2:48]))/nrow(MAE_W2_AUTO_ARIMAX_TEMPERATURE))
+colnames(mean_absolute_error)<-c("MAE_W2_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean WIS and MAE ####
+
+WIS_MAE_W2_AUTO_ARIMAX_TEMPERATURE<-cbind(mean_wis_each_state,mean_absolute_error)
+write.csv(WIS_MAE_W2_AUTO_ARIMAX_TEMPERATURE, file = "WIS_MAE_W2_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+```
+
+GETTING WIS AND MAE FOR 3 WEEKS AHEAD AND THE EXECUTION TIME
+
+```{r cars}
+
+source("FINAL_TEMPERATURE.r", local = TRUE, chdir = TRUE)
+
+start_time <- Sys.time() # Record start time
+
+WIS_W3_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 594))
+MAE_W3_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 594))
+
+  for (i in 1:47){
+    wis_mae=CLEAN_TEMPERATURE(states_data,temperature_dataset,US_STATE=i, auto=TRUE, my_n_ahead=3)
+    
+    WIS_W3_AUTO_ARIMAX_TEMPERATURE <- cbind(WIS_W3_AUTO_ARIMAX_TEMPERATURE,wis_mae[2])
+    MAE_W3_AUTO_ARIMAX_TEMPERATURE <- cbind(MAE_W3_AUTO_ARIMAX_TEMPERATURE,wis_mae[3])
+    
+    WIS_W3_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    MAE_W3_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    
+    print(i)
+  }
+
+# Your code here
+end_time <- Sys.time() # Record end time
+# Calculate elapsed time
+execution_time <- end_time - start_time
+execution_time
+
+write.csv(execution_time, file = "exc_time_WIS_W3_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+#### Name of the dataset ####
+dates_names<-c("Dates")
+states_names <- state_codes$location_name[1:47]
+colnames(WIS_W3_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+colnames(MAE_W3_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+
+# WRITE THE CSVs of the files
+write.csv(WIS_W3_AUTO_ARIMAX_TEMPERATURE, file = "WIS_W3_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+write.csv(MAE_W3_AUTO_ARIMAX_TEMPERATURE, file = "MAE_W3_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+#### Mean WIS by state ####
+mean_wis_each_state<-data.frame(colMeans(WIS_W3_AUTO_ARIMAX_TEMPERATURE[,2:48]))
+colnames(mean_wis_each_state)<-c("MEAN_WIS_W3_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean MAE by state ####
+mean_absolute_error<-data.frame(colSums(abs(MAE_W3_AUTO_ARIMAX_TEMPERATURE[,2:48]))/nrow(MAE_W3_AUTO_ARIMAX_TEMPERATURE))
+colnames(mean_absolute_error)<-c("MAE_W3_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean WIS and MAE ####
+WIS_MAE_W3_AUTO_ARIMAX_TEMPERATURE<-cbind(mean_wis_each_state,mean_absolute_error)
+write.csv(WIS_MAE_W3_AUTO_ARIMAX_TEMPERATURE, file = "WIS_MAE_W3_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+```
+
+GETTING WIS AND MAE FOR 4 WEEKS AHEAD AND THE EXECUTION TIME
+
+```{r pressure, echo=FALSE}
+
+source("FINAL_TEMPERATURE.r", local = TRUE, chdir = TRUE)
+
+start_time <- Sys.time() # Record start time
+
+WIS_W4_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 593))
+MAE_W4_AUTO_ARIMAX_TEMPERATURE <- data.frame(matrix(ncol = 1, nrow = 593))
+
+  for (i in 1:47){
+    wis_mae=CLEAN_TEMPERATURE(states_data,temperature_dataset,US_STATE=i, auto=TRUE, my_n_ahead=4)
+    
+    WIS_W4_AUTO_ARIMAX_TEMPERATURE <- cbind(WIS_W4_AUTO_ARIMAX_TEMPERATURE,wis_mae[2])
+    MAE_W4_AUTO_ARIMAX_TEMPERATURE <- cbind(MAE_W4_AUTO_ARIMAX_TEMPERATURE,wis_mae[3])
+    
+    WIS_W4_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    MAE_W4_AUTO_ARIMAX_TEMPERATURE[1]<-wis_mae[1]
+    
+    print(i)
+  }
+
+# Your code here
+end_time <- Sys.time() # Record end time
+# Calculate elapsed time
+execution_time <- end_time - start_time
+execution_time
+
+write.csv(execution_time, file = "exc_time_WIS_W4_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+#### Name of the dataset ####
+dates_names<-c("Dates")
+states_names <- state_codes$location_name[1:47]
+colnames(WIS_W4_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+colnames(MAE_W4_AUTO_ARIMAX_TEMPERATURE) <- append(dates_names,states_names)
+
+# WRITE THE CSVs of the files
+write.csv(WIS_W4_AUTO_ARIMAX_TEMPERATURE, file = "WIS_W4_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+write.csv(MAE_W4_AUTO_ARIMAX_TEMPERATURE, file = "MAE_W4_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+#### Mean WIS by state ####
+mean_wis_each_state<-data.frame(colMeans(WIS_W4_AUTO_ARIMAX_TEMPERATURE[,2:48]))
+colnames(mean_wis_each_state)<-c("MEAN_WIS_W4_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean MAE by state ####
+mean_absolute_error<-data.frame(colSums(abs(MAE_W4_AUTO_ARIMAX_TEMPERATURE[,2:48]))/nrow(MAE_W4_AUTO_ARIMAX_TEMPERATURE))
+colnames(mean_absolute_error)<-c("MAE_W4_AUTO_ARIMAX_TEMPERATURE")
+
+#### Mean WIS and MAE ####
+WIS_MAE_W4_AUTO_ARIMAX_TEMPERATURE<-cbind(mean_wis_each_state,mean_absolute_error)
+write.csv(WIS_MAE_W4_AUTO_ARIMAX_TEMPERATURE, file = "WIS_MAE_W4_AUTO_ARIMAX_TEMPERATURE.csv", row.names = FALSE)
+
+```
+
+

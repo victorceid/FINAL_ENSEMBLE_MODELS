@@ -1,0 +1,353 @@
+---
+title: "Ensembles of ARIMA models for influenza forecasting"
+author: "John M. Drake"
+date: \today
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+In 2022-2023 student Ryan Riley initiated a series of experiments investigating the forecasting skill of ensembles of ARIMA models.
+This analysis picks up where he left off and continues that investigation.
+
+```{r load-packages, echo=TRUE, results='hide', message=FALSE}
+library("feasts")
+library("MMWRweek")
+library("data.table")
+library("caret")
+library("purrr")
+library("skimr")
+library("ggcorrplot")
+library("DataExplorer")
+library("cdcfluview")
+library("dplyr")
+library("tseries")
+library("forecast")
+library("tsibble")
+library("berryFunctions")
+library("scoringutils")
+library("covidHubUtils")
+library("gtools")
+library("parallel")
+library("doParallel")
+library("foreach")
+library("future")#https://cran.r-project.org/web/packages/future/vignettes/future-4-issues.html
+library("listenv")
+```
+
+
+Load and prepare the data
+
+```{r load-data, echo=TRUE, message=FALSE}
+
+LET_IT_RIP<-FALSE
+
+
+source("HelperFunctions_.R", local = TRUE, chdir = TRUE)
+#main_path<-"/home/ryan/School/RA/"
+#my_path="/home/ryan/School/RA/flu-data-main/Flu-2021-2022"
+#nm <- list.files(my_path,full.names = TRUE)
+
+my_data = read.csv("Fluview_20221116.csv")
+state_codes_population<-read.csv("State_Codes_Pop.csv")
+my_data = subset(my_data, select = c(ST_FIPS,week_start,ilitotal) )
+
+names(my_data)<- c("location","target_end_date","cases" )
+
+my_data$location<-as.numeric(my_data$location)
+#3. convert date to ts object
+my_data$target_end_date = as.Date(my_data$target_end_date)
+
+my_data<-my_data[order(my_data$target_end_date), ]
+rownames(my_data)<- NULL
+
+my_data[apply(my_data, 1, purrr::compose(is.finite, all)),]#this is needed
+my_data<-na.omit(my_data)
+
+my_data=my_data[my_data$location != "",]
+
+#4. add column to df that represents the endemic week-> use the mmwr/something package
+my_data<-cbind(my_data, MMWRweek(my_data$target_end_date))
+
+state_ids = unique(my_data$location)
+grouped_by_location <- split(my_data, f = list("location"))
+grouped_data <-my_data %>% group_split(location)
+
+
+
+##################
+# add missing days
+##################
+#begin_date<-my_data$target_end_date[1]
+begin_date<-MMWRweek2Date(my_data$MMWRyear[1], 36)
+for(i in 1:length(grouped_data) ){
+  #print(paste0("nrow_before ", nrow(grouped_data[[i]])))
+  for(date_iter in 2:nrow(grouped_data[[i]])-1 ){
+    diff =grouped_data[[i]]$target_end_date[date_iter] - grouped_data[[i]]$target_end_date[date_iter+1]
+    if(abs(diff) > 7 || (date_iter == 1 && begin_date < grouped_data[[i]]$target_end_date[date_iter]) ) {
+      if(date_iter == 1 && begin_date < grouped_data[[i]]$target_end_date[date_iter]){
+        #print(paste0("missing start dates ",date_iter," ",begin_date," ",grouped_data[[i]]$target_end_date[date_iter]))
+        missing_date<- begin_date
+        end_date<-grouped_data[[i]]$target_end_date[date_iter]
+        date_counter<-date_iter
+      }
+      else{
+        missing_date<-grouped_data[[i]]$target_end_date[date_iter]
+        end_date<-grouped_data[[i]]$target_end_date[date_iter+1]
+        date_counter<-date_iter+1
+        missing_date<-missing_date+7
+      }
+      while(missing_date != end_date){
+        epi_date<-MMWRweek(missing_date)
+        missing_data<- data.frame(grouped_data[[i]]$location,missing_date,0,epi_date[1],epi_date[2],epi_date[3])
+        colnames(missing_data)<-colnames(grouped_data[[i]])
+        #grouped_data[[i]]<-rbind(grouped_data[[i]],missing_data)
+        #print("before");print(grouped_data[[i]][date_counter,])
+        grouped_data[[i]] <- insertRows(grouped_data[[i]], date_counter , new = missing_data)
+        #print("after");print(grouped_data[[i]][date_counter,])
+        date_counter<- date_counter+1
+        missing_date<-missing_date+7
+      }
+      #print(paste0("nrow_after ", nrow(grouped_data[[i]])))
+      # print(grouped_data[[i]][date_iter,])
+      # print(grouped_data[[i]][date_iter+1,])
+      # print(paste0(i," ",diff," date_iter ",date_iter," ",grouped_data[[i]]$target_end_date[date_iter]," ", grouped_data[[i]]$target_end_date[date_iter+1]) )
+    }
+  }
+}
+```
+
+Here is a chart of the number of cases by week
+
+```{r weekly-cases, echo=TRUE, message=FALSE}
+
+for(i in 1:length(grouped_data) ){
+  title_<- state_codes_population[state_codes_population$location == grouped_data[[i]]$location[1], ]$location_name
+  p <- ggplot(grouped_data[[i]], aes(x=target_end_date, y=cases)) +geom_line()+ scale_x_date(date_breaks = "2 months")+
+    theme(axis.text.x=element_text(angle=50, hjust=1)) + labs(title = title_)
+  p
+  print(p)
+  if(!LET_IT_RIP)
+    break
+}
+
+```
+
+Here is a chart of the number of cases by week on a log scale
+
+```{r weekly-cases-log, echo=TRUE, message=FALSE}
+
+for(i in 1:length(grouped_data) ){
+  title_<- state_codes_population[state_codes_population$location == grouped_data[[i]]$location[1], ]$location_name
+  p <- ggplot(grouped_data[[i]], aes(x=target_end_date, y=log(cases+1)   )) +geom_line()+ scale_x_date(date_breaks = "2 months")+
+    theme(axis.text.x=element_text(angle=50, hjust=1)) + labs(title = title_)
+  p
+  print(p)
+  if(!LET_IT_RIP)
+    break
+}
+
+```
+
+Create the pdq's for the non seasonal component of the SARIMA model. The print out below shows all the combinations of the pdq's were [,1] = p, [,2] = d, [,3] = q. The com variable is  vector of the pdq's that you want to use in the model.
+
+```{r chunky4, echo=TRUE, message=FALSE}
+com=c(0,1,2,3)
+my_order_params<-permutations(4,3,com, repeats.allowed = TRUE)
+print(my_order_params)
+```
+I was able to reduce the running time from ~hour down to ~30minutes. I was able to do this by using the `future` package which allows me to split up the data and run `PredictByIteration` in/on different process/threads. I have a couple more things I need to try out to see if we can make these running times a more little more reasonable. I also have to do some restructing of the code so we can iterate over all states/territories.
+
+```{r threading, echo=TRUE, message=FALSE}
+
+my_preds_list_test<-listenv()
+my_preds_list_test_test<-listenv()
+#my_preds_list_test_test[[2]]<-listenv()
+done<-FALSE
+plan(multicore)
+done%<-% GetPredsForSingleState(grouped_data = grouped_data[[1]], my_preds_list_test )
+
+
+for(i in 1:NROW(my_preds_list_test)){
+  resolved(my_preds_list_test[[i]])
+}
+
+my_preds_list<-my_preds_list_test
+
+
+
+```
+
+Now we get the errors and perform some simple analysis. In the chart titled "Ensemble" the circles represent the actual cases and the blue line represents the absolute value of the errors. At this moment I would not put to much weight in the results. I want to go over everything with a fine toothed comb and make sure that there are no errors.
+
+```{r errors, echo=TRUE, message=FALSE}
+
+#put pred and quantiles into seperate lists
+list_all_preds<-list()
+list_all_quantiles<- list()
+list_all_gofs<- list()
+for(i in 1:NROW(my_preds_list) ){
+  list_all_preds[[i]]<- my_preds_list[[i]][[1]][[1]]#I think the very last[[1]] is for the state
+  list_all_quantiles[[i]]<-my_preds_list[[i]][[2]][[1]]#I think the very last[[1]] is for the state
+}
+
+
+#Ensemble prediction
+all_preds<-list()
+all_preds[[1]]<-Reduce(function(x, y) merge(x, y, all=TRUE), list_all_preds)#this doesn't work if listas are not all the same size
+my_errors<- GetErrorsNoSplits(my_data = grouped_data, prediction = all_preds ) #THIS LINE BROKEN -JMD
+checkresiduals(my_errors[[1]])
+kpss.test(my_errors[[1]]$residuals)
+mean_absolute_error<-sum(abs(my_errors[[1]]$residuals) )/nrow(my_errors[[1]])
+plot(my_errors[[1]]$Error_For_Date, my_errors[[1]]$residuals, main="Ensemble",sub = paste0("mean_absolute_error ",mean_absolute_error, " mean of error ",mean(my_errors[[1]]$residuals) ))
+
+abd<-grouped_data[[1]][grouped_data[[1]]$target_end_date%in%my_errors[[1]]$Error_For_Date,]
+plot(abd$target_end_date, abd$cases, main="Ensemble",sub = paste0("mean_absolute_error ",mean_absolute_error, " mean of error ",mean(my_errors[[1]]$residuals) ))
+lines(my_errors[[1]]$Error_For_Date, abs(my_errors[[1]]$residuals), col="blue")
+
+```
+Prepare data for calculating quantiles and scoring.
+
+```{r chunky8, echo=TRUE, message=FALSE}
+
+#################################################
+#
+# remove duplicate dates and put into a single list
+#
+#################################################
+#list_all_quantiles<- list(my_preds_1[[2]][[1]],my_preds_2[[2]][[1]],my_preds_3[[2]][[1]],my_preds_4[[2]][[1]],my_preds_5[[2]][[1]])
+for(i in 1:(NROW(list_all_quantiles) -1) ){
+  print(paste0("i ", i ) )
+  for(a in which(names(list_all_quantiles[[i+1]]) %in% names(list_all_quantiles[[i]])) ){
+    #print(a)
+    #print(paste0("To remove ", names(list_all_quantiles[[i+1]][1]) ) )
+    list_all_quantiles[[i+1]][[1]]<-NULL
+  }
+}
+
+#put all quantiles into a single list
+final_quantiles<-list(list() )
+for(i in 1:(NROW(list_all_quantiles) ) ){
+  print(paste0("i ", i ) )
+  for(a in 1:(NROW(list_all_quantiles[[i]]) ) ){
+    #print(a)
+    #print(paste0("To remove ", names(list_all_quantiles[[1]) ) )
+    for(a in names(list_all_quantiles[[i]]) )
+      final_quantiles[[1]][[a]]<-list_all_quantiles[[i]][[a]]
+  }
+}
+
+
+
+##################################################
+#
+# remove duplicate dates and put into a single list
+#
+#################################################
+#get tue values and put quantiles into a tibble
+pred_dates<- as.Date(names(final_quantiles[[1]]), format="%Y-%m-%d")
+my_true_values<-grouped_data[[1]]$cases[grouped_data[[1]]$target_end_date %in% pred_dates ]
+
+my_lower<-expm1(final_quantiles[[1]][[1]]$lower)
+my_upper<-expm1(final_quantiles[[1]][[1]]$uppper)
+my_quantiles<-expm1(final_quantiles[[1]][[1]]$quantile)
+my_interval_range<- interval_range <- rep(98, 23)
+my_interval_score<-interval_score(my_true_values[1],my_lower,my_upper,my_interval_range,weigh = TRUE,separate_results = FALSE)
+
+my_quantiles_scores<-scoringutils::quantile_score(my_true_values[1],my_quantiles , c(0.01, 0.025, seq(0.05, 0.95, by = 0.05), 0.975, 0.99))
+
+# Defining the function FormatForScoring which is in his helpers documentation
+
+FormatForScoring <- function(pred_intervals, state_codes_population, grouped_data, model_name, my_n_week_ahead=1, my_temporal_resolution="wk", my_target_variable="cases") {
+  my_tibble<- NULL
+  my_tibble<-tibble(model=c(""),forecast_date=c(""), location=c(double() ), horizon=c(double() ),
+                    temporal_resolution=c(""), target_variable=c(""), target_end_date=c(as.Date(c()) ), type= c(""), quantile=c(double() ),
+                    value =c(double() ))
+  
+  for(i in 1:NROW(pred_intervals) ){# ????    delete after verifying   vs length(pred_intervals) ){
+    dates_to_get<- names(pred_intervals[[i]])
+    my_location_name<- state_codes_population[state_codes_population$location==1,]$location_name
+    #my_location<-toString(state_codes_population[state_codes_population$location==grouped_data[[i]]$location[1],]$location)
+    my_location<-grouped_data[[i]]$location[1]
+    #the location needs to be a string I just have it as a double becuase it is quick to change here instead of train_test_validate
+    #my_target_end_date<- my_preds[[1]]$Pred_For_Date[1]+6#the six may need to be changed
+    for(dates_ in dates_to_get){
+      
+      my_target_end_date<-as.Date(dates_)-7
+      my_tibble<- my_tibble%>%add_row(model=model_name,forecast_date=dates_, location=my_location, horizon=my_n_week_ahead,
+                                      temporal_resolution=my_temporal_resolution, target_variable=my_target_variable, target_end_date=my_target_end_date, type= "point", quantile=NA,
+                                      value = expm1(pred_intervals[[1]][[dates_]]$point_forecast[1]) )
+      for(quantile_level in pred_intervals[[i]][dates_]){
+        #my_quantile<-quantile_level$pi_level
+        #  print(dates_)
+        
+        #for(quant_value in 1:nrow(quantile_level)){
+        #print(quant_value)
+        
+        my_quantile_value<-expm1(quantile_level$quantile)#(quantile_level$lower[quant_value] + quantile_level$uppper[quant_value])/2
+        #print(paste0("my_quantile_value ", my_quantile_value," ", quantile_level$lower[1]," ",quantile_level$uppper[1])       )
+        my_tibble<-my_tibble%>%add_row(model=model_name,forecast_date=dates_, location=my_location, horizon=my_n_week_ahead,
+                                       temporal_resolution=my_temporal_resolution, target_variable=my_target_variable, target_end_date=my_target_end_date, type= "quantile",
+                                       quantile=quantile_level$pi_level, value = my_quantile_value)
+        
+        #}
+        
+      }
+      
+    }
+  }
+  return(my_tibble)
+}
+
+
+#get true values and put quantiles into a tibble
+my_tibble_quantiles<- FormatForScoring(pred_intervals=final_quantiles, state_codes_population, grouped_data, model_name = "TestModel")
+grouped_data_copy_<-grouped_data
+grouped_data_df<-NULL
+grouped_data_df<-as.data.frame(grouped_data[[1]])
+grouped_data_df["target_variable"]<-"cases"
+grouped_data_df["model"]<-my_tibble_quantiles[1,"model"]#"TestModel"
+grouped_data_df<- grouped_data_df %>% rename_at("cases", ~'value')
+
+my_forecast_scores<-score_forecasts(my_tibble_quantiles, grouped_data_df)
+
+```
+The average weekly weighted interval score
+
+```{r chunky9, echo=TRUE, message=FALSE}
+print(paste0("Mean WIS ", mean(my_forecast_scores[,"wis"]$wis) ) )
+
+#Individual model gof' stats
+all_gofs<- list()
+for(j in 1:NROW(my_preds_list[[1]][[3]][[1]]) ){
+  for(i in 1:NROW(my_preds_list) ){
+    list_all_gofs[[i]]<- my_preds_list[[i]][[3]][[1]][[j]]#I think the very last[[1]] is for the state
+  }
+  all_gofs[[j]]<- Reduce(function(x, y) merge(x, y, all=TRUE), list_all_gofs)
+}
+
+new_df<-data.frame("Date"=all_gofs[[1]]$Date)
+loglik_df<-data.frame("Date"=all_gofs[[1]]$Date)
+r2_df<-data.frame("Date"=all_gofs[[1]]$Date)
+for(i in 1:NROW(all_gofs)){
+  column_name<- toString(paste0("AIC",toString(i)))
+  new_df[column_name]<-all_gofs[[i]]$AIC
+  loglik_df[toString(paste0("loglik",toString(i)))]<-all_gofs[[i]]$loglik
+  r2_df[toString(paste0("r2",toString(i)))]<-all_gofs[[i]]$R2
+}
+
+```
+Boxplots for goodness of fit statistics for each individual model in the ensemble 
+```{r chunky10, echo=TRUE, message=FALSE}
+
+boxplot(new_df[,names(new_df)[-1]], outline = TRUE,xlab="AIC",notch = TRUE)
+boxplot(loglik_df[,names(loglik_df)[-1]], outline = TRUE,xlab="loglik",notch = TRUE)
+boxplot(r2_df[,names(r2_df)[-1]], outline = TRUE,xlab="R2",notch = TRUE)
+
+
+
+```
